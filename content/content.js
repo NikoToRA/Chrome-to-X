@@ -175,16 +175,10 @@ function insertTextDirectly(element, text, options = {}) {
     if (typeof document.execCommand === 'function') {
       const executed = document.execCommand('insertText', false, text);
       if (executed) {
-        element.dispatchEvent(new InputEvent('input', { 
-          bubbles: true, 
-          cancelable: true,
-          inputType,
-          data: text
-        }));
+        console.log('[Chrome to X] execCommand で挿入しました');
         if (dispatchChange) {
           element.dispatchEvent(new Event('change', { bubbles: true }));
         }
-        console.log('[Chrome to X] execCommand で挿入しました');
         return true;
       }
     }
