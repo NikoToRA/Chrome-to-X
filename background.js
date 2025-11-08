@@ -249,6 +249,23 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     })();
     return true; // 非同期レスポンス用
   }
+
+  if (request.action === 'claudeChat') {
+    handleClaudeChat(request.payload)
+      .then((result) => {
+        sendResponse(result);
+      })
+      .catch((error) => {
+        console.error('[Background] Claudeチャットエラー:', error);
+        sendResponse({
+          success: false,
+          error: error.message || 'Claude APIの呼び出しに失敗しました',
+          status: error.status || null,
+          details: error.details || null
+        });
+      });
+    return true; // 非同期レスポンス用
+  }
 });
 
 // ArrayBufferをBase64に変換
@@ -259,4 +276,131 @@ function arrayBufferToBase64(buffer) {
     binary += String.fromCharCode(bytes[i]);
   }
   return btoa(binary);
+}
+
+const CLAUDE_API_ENDPOINT = 'https://api.anthropic.com/v1/messages';
+const CLAUDE_API_VERSION = '2023-06-01';
+const CLAUDE_DEFAULT_MODEL = 'claude-3-7-sonnet-20250219';
+const CLAUDE_MAX_TOKENS = 1024;
+
+async function handleClaudeChat(payload) {
+  if (!payload || !Array.isArray(payload.messages)) {
+    return {
+      success: false,
+      error: '不正なリクエストです'
+    };
+  }
+
+  const apiKey = await getClaudeApiKey();
+  if (!apiKey) {
+    return {
+      success: false,
+      error: 'Claude APIキーが設定されていません'
+    };
+  }
+
+  try {
+    const response = await callClaudeApi({
+      apiKey,
+      instructions: payload.instructions,
+      messages: payload.messages
+    });
+
+    return {
+      success: true,
+      message: response.text,
+      usage: response.usage || null
+    };
+  } catch (error) {
+    throw error;
+  }
+}
+
+async function callClaudeApi({ apiKey, instructions, messages }) {
+  const requestBody = buildClaudeRequestBody({ instructions, messages });
+
+  const response = await fetch(CLAUDE_API_ENDPOINT, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': CLAUDE_API_VERSION,
+      'anthropic-dangerous-direct-browser-access': 'true'
+    },
+    body: JSON.stringify(requestBody)
+  });
+
+  if (!response.ok) {
+    const status = response.status;
+    const rawError = await response.text();
+    let message = `Claude API error: ${status}`;
+    let details = null;
+
+    try {
+      const parsed = JSON.parse(rawError);
+      message = parsed?.error?.message || message;
+      details = parsed;
+    } catch (parseError) {
+      details = rawError;
+    }
+
+    throw {
+      status,
+      message,
+      details
+    };
+  }
+
+  const data = await response.json();
+  const text = extractClaudeText(data);
+  return {
+    text,
+    usage: data?.usage
+  };
+}
+
+function buildClaudeRequestBody({ instructions, messages }) {
+  const formattedMessages = messages
+    .filter((message) => message?.role && message?.content)
+    .map((message) => ({
+      role: message.role === 'assistant' ? 'assistant' : 'user',
+      content: [
+        {
+          type: 'text',
+          text: String(message.content || '')
+        }
+      ]
+    }));
+
+  const body = {
+    model: CLAUDE_DEFAULT_MODEL,
+    max_tokens: CLAUDE_MAX_TOKENS,
+    messages: formattedMessages
+  };
+
+  if (instructions) {
+    body.system = instructions;
+  }
+
+  return body;
+}
+
+function extractClaudeText(responseData) {
+  if (!responseData) return '';
+  if (Array.isArray(responseData?.content)) {
+    return responseData.content
+      .map((item) => (item?.text ? item.text : ''))
+      .filter(Boolean)
+      .join('\n')
+      .trim();
+  }
+  return '';
+}
+
+async function getClaudeApiKey() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(['claudeApiKey'], (result) => {
+      resolve(result?.claudeApiKey || '');
+    });
+  });
 }

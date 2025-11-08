@@ -467,6 +467,31 @@ body {
   align-self: flex-start;
 }
 
+.ai-message-pending {
+  opacity: 0.8;
+}
+
+.ai-message-error {
+  border: 1px solid rgba(220, 53, 69, 0.3);
+  background-color: #fff5f5;
+  color: #a71d2a;
+}
+
+.ai-message-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-style: italic;
+  color: #657786;
+}
+
+.ai-chat-empty {
+  padding: 24px;
+  text-align: center;
+  color: #657786;
+  font-size: 13px;
+}
+
 .ai-agent-select {
   display: flex;
   align-items: center;

@@ -6,45 +6,40 @@ const closeSettingsBtn = document.getElementById('closeSettingsBtn');
 const agentsList = document.getElementById('agentsList');
 const toastContainer = document.getElementById('toastContainer');
 
-const DEFAULT_AGENTS = [
-  {
-    id: 'buzz',
-    label: 'Buzz Booster',
-    name: 'バズ投稿エージェント',
-    description: 'SNSで話題を生むテンション高めの投稿を生成します。',
-    instructions: '最新のトレンドやエモーショナルなフレーズを織り交ぜ、ユーザーの共感を誘う構成でテキストを組み立ててください。140文字以内を推奨。'
-  },
-  {
-    id: 'reply',
-    label: 'Reply Concierge',
-    name: '返信サポートエージェント',
-    description: '丁寧かつ簡潔な返信メッセージを提案します。',
-    instructions: '相手の意図を汲み取り、礼儀正しく、次のアクションが明確になる文章を提案してください。語尾は柔らかく。'
-  },
-  {
-    id: 'editor',
-    label: 'Rewrite Master',
-    name: '文章リライトエージェント',
-    description: '既存の文章を読みやすくリライトします。',
-    instructions: '元のニュアンスを保ちながら、構成・語彙を整え、プロフェッショナルで信頼できる印象の文章に書き換えてください。'
-  }
-];
+const state = {
+  defaultAgents: (window.AiAgentUtils && window.AiAgentUtils.getDefaultAgents()) || [],
+  agents: [],
+  isSavingApiKey: false,
+  isSavingAgents: false
+};
 
 document.addEventListener('DOMContentLoaded', initOptions);
 
 async function initOptions() {
-  await loadApiKey();
-  renderAgents(DEFAULT_AGENTS);
   bindEvents();
+  await Promise.all([loadApiKey(), loadAgents()]);
+  setupStorageWatchers();
 }
 
 async function loadApiKey() {
   try {
-    const apiKey = await StorageManager.get('claudeApiKey', '');
+    const apiKey = await StorageManager.getApiKey();
     claudeApiKeyInput.value = apiKey;
   } catch (error) {
     console.error('[Options] APIキーの読み込みに失敗しました', error);
     showToast('APIキーの読み込みに失敗しました', 'warning');
+  }
+}
+
+async function loadAgents() {
+  try {
+    const defaults = getDefaultAgents();
+    const storedAgents = await StorageManager.getAgents(defaults);
+    state.agents = normalizeAgents(storedAgents, defaults);
+    renderAgents();
+  } catch (error) {
+    console.error('[Options] エージェントの読み込みに失敗しました', error);
+    showToast('エージェントの読み込みに失敗しました', 'warning');
   }
 }
 
@@ -58,9 +53,7 @@ function bindEvents() {
   }
 
   if (addAgentBtn) {
-    addAgentBtn.addEventListener('click', () => {
-      showToast('エージェントの追加機能は準備中です', 'info');
-    });
+    addAgentBtn.addEventListener('click', handleAddAgent);
   }
 
   if (closeSettingsBtn) {
@@ -70,22 +63,36 @@ function bindEvents() {
   }
 
   if (agentsList) {
-    agentsList.addEventListener('click', (event) => {
-      const action = event.target.getAttribute('data-action');
-      if (!action) return;
-
-      event.preventDefault();
-
-      const messages = {
-        save: 'エージェントの保存機能は準備中です',
-        delete: 'エージェントの削除機能は準備中です',
-        duplicate: 'エージェントの複製機能は準備中です',
-        reset: '初期値へのリセット機能は準備中です'
-      };
-
-      showToast(messages[action] || 'この機能は準備中です', 'info');
-    });
+    agentsList.addEventListener('click', handleAgentAction);
   }
+}
+
+function setupStorageWatchers() {
+  if (!chrome?.storage?.onChanged) return;
+
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local') return;
+
+    if (changes[StorageManager.STORAGE_KEYS.CLAUDE_API_KEY]) {
+      const newValue = changes[StorageManager.STORAGE_KEYS.CLAUDE_API_KEY].newValue || '';
+      if (claudeApiKeyInput && claudeApiKeyInput.value !== newValue) {
+        claudeApiKeyInput.value = newValue;
+        if (!state.isSavingApiKey) {
+          showToast('他のタブで更新されたAPIキーを反映しました', 'info');
+        }
+      }
+    }
+
+    if (changes[StorageManager.STORAGE_KEYS.AI_AGENTS]) {
+      const defaults = getDefaultAgents();
+      const newAgents = changes[StorageManager.STORAGE_KEYS.AI_AGENTS].newValue;
+      state.agents = normalizeAgents(newAgents, defaults);
+      renderAgents();
+      if (!state.isSavingAgents) {
+        showToast('エージェント設定を同期しました', 'info');
+      }
+    }
+  });
 }
 
 function toggleApiKeyVisibility() {
@@ -95,65 +102,322 @@ function toggleApiKeyVisibility() {
 }
 
 async function saveApiKey() {
+  if (state.isSavingApiKey) return;
   const apiKey = claudeApiKeyInput.value.trim();
-  try {
-    await StorageManager.set('claudeApiKey', apiKey);
-    showToast('APIキーを保存しました', 'info');
-  } catch (error) {
-    console.error('[Options] APIキーの保存に失敗しました', error);
-    showToast('APIキーの保存に失敗しました', 'warning');
-  }
-}
+  const validationError = validateApiKey(apiKey);
 
-function renderAgents(agents) {
-  if (!agentsList) return;
-  if (!Array.isArray(agents) || agents.length === 0) {
-    agentsList.innerHTML = '<div class="empty-state">まだエージェントがありません。右上の「新規エージェント」から作成してください。</div>';
+  if (validationError) {
+    showToast(validationError, 'warning');
     return;
   }
 
-  agentsList.innerHTML = agents.map((agent, index) => {
-    const safe = {
-      id: agent.id || `agent-${index}`,
-      label: escapeHtml(agent.label || `Agent ${index + 1}`),
-      name: escapeHtml(agent.name || ''),
-      description: escapeHtml(agent.description || ''),
-      instructions: escapeHtml(agent.instructions || '')
-    };
-    const nameId = `${safe.id}-name`;
-    const descriptionId = `${safe.id}-description`;
-    const instructionsId = `${safe.id}-instructions`;
+  try {
+    state.isSavingApiKey = true;
+    setButtonLoading(saveApiKeyBtn, true, '保存中…');
+    await StorageManager.saveApiKey(apiKey);
+    const message = apiKey ? 'APIキーを保存しました' : 'APIキーをクリアしました';
+    showToast(message, 'info');
+  } catch (error) {
+    console.error('[Options] APIキーの保存に失敗しました', error);
+    showToast('APIキーの保存に失敗しました', 'warning');
+  } finally {
+    state.isSavingApiKey = false;
+    setButtonLoading(saveApiKeyBtn, false, '保存する');
+  }
+}
 
-    return `
-      <article class="agent-card" data-agent-id="${safe.id}">
-        <div class="agent-card-header">
-          <span class="agent-badge">${safe.label}</span>
-          <div class="agent-card-actions">
-            <button type="button" class="btn btn-ghost btn-sm" data-action="duplicate">複製</button>
-            <button type="button" class="btn btn-ghost btn-sm" data-action="delete">削除</button>
+function validateApiKey(apiKey) {
+  if (!apiKey) {
+    return null; // 空文字はクリア操作として許容
+  }
+
+  const basicPattern = /^sk-[a-z0-9-_]{5,}$/i;
+  if (!basicPattern.test(apiKey)) {
+    return 'APIキーの形式が正しくありません（例: sk-xxxxx）。';
+  }
+
+  return null;
+}
+
+function handleAddAgent() {
+  const newAgent = createBlankAgent();
+  state.agents = [...state.agents, newAgent];
+  renderAgents();
+  showToast('新しいエージェントを追加しました', 'info');
+}
+
+async function handleAgentAction(event) {
+  const action = event.target.getAttribute('data-action');
+  if (!action) return;
+
+  const card = event.target.closest('.agent-card');
+  if (!card) return;
+
+  const agentId = card.getAttribute('data-agent-id');
+  if (!agentId) return;
+
+  switch (action) {
+    case 'save':
+      await handleSaveAgent(card, agentId);
+      break;
+    case 'delete':
+      await handleDeleteAgent(agentId);
+      break;
+    case 'duplicate':
+      await handleDuplicateAgent(agentId);
+      break;
+    case 'reset':
+      await handleResetAgent(agentId);
+      break;
+    default:
+      break;
+  }
+}
+
+async function handleSaveAgent(card, agentId) {
+  if (state.isSavingAgents) return;
+  const updatedAgent = extractAgentFromCard(card, agentId);
+
+  if (!updatedAgent.name) {
+    showToast('エージェント名を入力してください', 'warning');
+    return;
+  }
+
+  const existingIndex = state.agents.findIndex((agent) => agent.id === agentId);
+  if (existingIndex === -1) {
+    showToast('対象のエージェントが見つかりませんでした', 'warning');
+    return;
+  }
+
+  const nextAgents = [...state.agents];
+  nextAgents[existingIndex] = {
+    ...nextAgents[existingIndex],
+    ...updatedAgent,
+    updatedAt: new Date().toISOString()
+  };
+
+  await persistAgents(nextAgents, 'エージェントを保存しました');
+}
+
+async function handleDeleteAgent(agentId) {
+  if (state.isSavingAgents) return;
+  if (!confirm('このエージェントを削除しますか？')) {
+    return;
+  }
+
+  const nextAgents = state.agents.filter((agent) => agent.id !== agentId);
+  await persistAgents(nextAgents, 'エージェントを削除しました');
+}
+
+async function handleDuplicateAgent(agentId) {
+  if (state.isSavingAgents) return;
+
+  const target = state.agents.find((agent) => agent.id === agentId);
+  if (!target) {
+    showToast('複製元のエージェントが見つかりませんでした', 'warning');
+    return;
+  }
+
+  const duplicated = {
+    ...target,
+    id: AiAgentUtils.generateAgentId(target.id),
+    label: `${target.label || target.name} Copy`,
+    name: `${target.name}（複製）`,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const nextAgents = [...state.agents, duplicated];
+  await persistAgents(nextAgents, 'エージェントを複製しました');
+}
+
+async function handleResetAgent(agentId) {
+  if (state.isSavingAgents) return;
+  const defaults = getDefaultAgents();
+  const defaultAgent = defaults.find((agent) => agent.id === agentId);
+
+  if (!defaultAgent) {
+    showToast('初期値が存在しないエージェントです', 'info');
+    return;
+  }
+
+  const nextAgents = state.agents.map((agent) =>
+    agent.id === agentId
+      ? {
+          ...defaultAgent,
+          id: agent.id,
+          createdAt: agent.createdAt || defaultAgent.createdAt,
+          updatedAt: new Date().toISOString()
+        }
+      : agent
+  );
+
+  await persistAgents(nextAgents, 'エージェントを初期値に戻しました');
+}
+
+async function persistAgents(nextAgents, successMessage) {
+  try {
+    state.isSavingAgents = true;
+    setButtonLoading(addAgentBtn, true, '保存中…');
+    await StorageManager.saveAgents(nextAgents);
+    state.agents = normalizeAgents(nextAgents, getDefaultAgents());
+
+    const currentSelectedId = await StorageManager.getSelectedAgentId();
+    const resolvedSelectedId = resolveSelectedAgentId(state.agents, currentSelectedId);
+    if (resolvedSelectedId !== currentSelectedId) {
+      await StorageManager.saveSelectedAgentId(resolvedSelectedId);
+    }
+
+    renderAgents();
+    showToast(successMessage, 'info');
+  } catch (error) {
+    console.error('[Options] エージェントの保存に失敗しました', error);
+    showToast('エージェントの保存に失敗しました', 'warning');
+  } finally {
+    state.isSavingAgents = false;
+    setButtonLoading(addAgentBtn, false, '＋ 新規エージェント');
+  }
+}
+
+function extractAgentFromCard(card, agentId) {
+  const nameInput = card.querySelector('input[id$="-name"]');
+  const descriptionInput = card.querySelector('input[id$="-description"]');
+  const instructionsInput = card.querySelector('textarea[id$="-instructions"]');
+
+  return {
+    id: agentId,
+    label: card.querySelector('.agent-badge')?.textContent.trim() || '',
+    name: nameInput?.value.trim() || '',
+    description: descriptionInput?.value.trim() || '',
+    instructions: instructionsInput?.value.trim() || ''
+  };
+}
+
+function createBlankAgent() {
+  return window.AiAgentUtils
+    ? window.AiAgentUtils.createAgent({
+        label: 'Custom Agent',
+        name: '新しいエージェント',
+        description: '',
+        instructions: ''
+      })
+    : {
+        id: `agent-${Date.now()}`,
+        label: 'Custom Agent',
+        name: '新しいエージェント',
+        description: '',
+        instructions: '',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+}
+
+function normalizeAgents(agents, defaults) {
+  const normalized = Array.isArray(agents) ? agents : [];
+  const now = new Date().toISOString();
+  const defaultMap = new Map(defaults.map((agent) => [agent.id, agent]));
+
+  return normalized.map((agent, index) => {
+    const safeId = agent?.id || `agent-${index}`;
+    const fallback = defaultMap.get(safeId) || {};
+    return {
+      id: safeId,
+      label: agent?.label || fallback.label || `Agent ${index + 1}`,
+      name: agent?.name || fallback.name || '',
+      description: agent?.description || fallback.description || '',
+      instructions: agent?.instructions || fallback.instructions || '',
+      createdAt: agent?.createdAt || fallback.createdAt || now,
+      updatedAt: agent?.updatedAt || fallback.updatedAt || now
+    };
+  });
+}
+
+function getDefaultAgents() {
+  if (window.AiAgentUtils) {
+    return window.AiAgentUtils.getDefaultAgents();
+  }
+  return state.defaultAgents;
+}
+
+function resolveSelectedAgentId(agents, storedId) {
+  if (!Array.isArray(agents) || agents.length === 0) {
+    return '';
+  }
+
+  if (storedId && agents.some((agent) => agent.id === storedId)) {
+    return storedId;
+  }
+
+  return agents[0].id;
+}
+
+function renderAgents() {
+  if (!agentsList) return;
+
+  if (!Array.isArray(state.agents) || state.agents.length === 0) {
+    agentsList.innerHTML =
+      '<div class="empty-state">まだエージェントがありません。右上の「新規エージェント」から作成してください。</div>';
+    return;
+  }
+
+  agentsList.innerHTML = state.agents
+    .map((agent, index) => {
+      const safe = {
+        id: agent.id || `agent-${index}`,
+        label: escapeHtml(agent.label || `Agent ${index + 1}`),
+        name: escapeHtml(agent.name || ''),
+        description: escapeHtml(agent.description || ''),
+        instructions: escapeHtml(agent.instructions || '')
+      };
+      const nameId = `${safe.id}-name`;
+      const descriptionId = `${safe.id}-description`;
+      const instructionsId = `${safe.id}-instructions`;
+
+      return `
+        <article class="agent-card" data-agent-id="${safe.id}">
+          <div class="agent-card-header">
+            <span class="agent-badge">${safe.label}</span>
+            <div class="agent-card-actions">
+              <button type="button" class="btn btn-ghost btn-sm" data-action="duplicate">複製</button>
+              <button type="button" class="btn btn-ghost btn-sm" data-action="delete">削除</button>
+            </div>
           </div>
-        </div>
-        <div class="agent-card-body">
-          <label class="agent-field" for="${nameId}">
-            <span class="field-label">エージェント名</span>
-            <input id="${nameId}" type="text" class="input" value="${safe.name}" placeholder="エージェント名">
-          </label>
-          <label class="agent-field" for="${descriptionId}">
-            <span class="field-label">概要</span>
-            <input id="${descriptionId}" type="text" class="input" value="${safe.description}" placeholder="このエージェントの用途">
-          </label>
-          <label class="agent-field agent-field-wide" for="${instructionsId}">
-            <span class="field-label">システムプロンプト</span>
-            <textarea id="${instructionsId}" class="input" placeholder="AIに指示したいプロンプトを入力">${safe.instructions}</textarea>
-          </label>
-        </div>
-        <div class="agent-card-footer">
-          <button type="button" class="btn btn-ghost btn-sm" data-action="reset">初期値に戻す</button>
-          <button type="button" class="btn btn-primary btn-sm" data-action="save">保存</button>
-        </div>
-      </article>
-    `;
-  }).join('');
+          <div class="agent-card-body">
+            <label class="agent-field" for="${nameId}">
+              <span class="field-label">エージェント名</span>
+              <input id="${nameId}" type="text" class="input" value="${safe.name}" placeholder="エージェント名">
+            </label>
+            <label class="agent-field" for="${descriptionId}">
+              <span class="field-label">概要</span>
+              <input id="${descriptionId}" type="text" class="input" value="${safe.description}" placeholder="このエージェントの用途">
+            </label>
+            <label class="agent-field agent-field-wide" for="${instructionsId}">
+              <span class="field-label">システムプロンプト</span>
+              <textarea id="${instructionsId}" class="input" placeholder="AIに指示したいプロンプトを入力">${safe.instructions}</textarea>
+            </label>
+          </div>
+          <div class="agent-card-footer">
+            <button type="button" class="btn btn-ghost btn-sm" data-action="reset">初期値に戻す</button>
+            <button type="button" class="btn btn-primary btn-sm" data-action="save">保存</button>
+          </div>
+        </article>
+      `;
+    })
+    .join('');
+}
+
+function setButtonLoading(button, isLoading, labelWhenIdle) {
+  if (!button) return;
+  button.disabled = isLoading;
+  if (isLoading) {
+    button.dataset.originalLabel = button.textContent;
+    button.textContent = labelWhenIdle || button.textContent;
+  } else if (button.dataset.originalLabel) {
+    button.textContent = labelWhenIdle || button.dataset.originalLabel;
+    delete button.dataset.originalLabel;
+  } else if (labelWhenIdle) {
+    button.textContent = labelWhenIdle;
+  }
 }
 
 function showToast(message, type = 'info') {
@@ -168,12 +432,14 @@ function showToast(message, type = 'info') {
     toast.style.opacity = '0';
     toast.style.transform = 'translateY(10px)';
     setTimeout(() => {
-      toastContainer.removeChild(toast);
+      if (toast.parentElement === toastContainer) {
+        toastContainer.removeChild(toast);
+      }
     }, 240);
   }, 2200);
 }
 
-function escapeHtml(unsafe) {
+function escapeHtml(unsafe = '') {
   return unsafe
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')

@@ -36,15 +36,22 @@ const openSettingsBtn = document.getElementById('openSettingsBtn');
 let currentImages = [];
 let hashtags = [];
 let currentPlatform = null;
+const aiState = {
+  apiKey: '',
+  agents: [],
+  selectedAgentId: ''
+};
+let isAgentSelectionUpdateSilent = false;
 
 // 初期化
 async function init() {
-  await loadData();
+  await Promise.all([loadEditorState(), loadAiState()]);
   await detectPlatform();
   setupTabNavigation();
   setupEventListeners();
   setupPlatformDetection();
   setupDragAndDrop();
+  setupStorageObservers();
   updateCharCount();
   renderHashtags();
   renderImages();
@@ -89,8 +96,8 @@ function updatePlatformIndicator(platform) {
   }
 }
 
-// データの読み込み
-async function loadData() {
+// エディタ用データの読み込み
+async function loadEditorState() {
   const text = await StorageManager.getText();
   const images = await StorageManager.getImages();
   const savedHashtags = await StorageManager.getHashtags();
@@ -98,6 +105,32 @@ async function loadData() {
   textEditor.value = text;
   currentImages = images || [];
   hashtags = savedHashtags || [];
+}
+
+// AI設定の読み込み
+async function loadAiState() {
+  try {
+    const defaults = getDefaultAgents();
+    const [storedAgents, storedSelectedId, apiKey] = await Promise.all([
+      StorageManager.getAgents(defaults),
+      StorageManager.getSelectedAgentId(),
+      StorageManager.getApiKey()
+    ]);
+
+    aiState.apiKey = apiKey || '';
+    aiState.agents = normalizeAgents(storedAgents, defaults);
+    aiState.selectedAgentId = resolveSelectedAgentId(aiState.agents, storedSelectedId);
+
+    if (aiState.selectedAgentId !== storedSelectedId) {
+      await StorageManager.saveSelectedAgentId(aiState.selectedAgentId);
+    }
+
+    renderAgentSelector();
+    await loadChatHistory();
+  } catch (error) {
+    console.error('[SidePanel] AI設定の読み込みに失敗しました', error);
+    showNotification('AI設定の読み込みに失敗しました');
+  }
 }
 
 // データの保存
@@ -214,21 +247,13 @@ function setupEventListeners() {
   });
 
   if (sendAiToTextBtn) {
-    sendAiToTextBtn.addEventListener('click', () => {
-      showNotification('生成したテキストをテキスト編集に送る機能は準備中です');
+    sendAiToTextBtn.addEventListener('click', async () => {
+      await sendLatestAssistantMessageToEditor();
     });
   }
 
   if (agentSelector) {
-    agentSelector.addEventListener('change', () => {
-      const selectedValue = agentSelector.value;
-      if (!selectedValue) {
-        showNotification('エージェントを選択してください');
-        return;
-      }
-      const selectedLabel = agentSelector.options[agentSelector.selectedIndex].text.trim();
-      showNotification(`「${selectedLabel}」と会話を開始します`);
-    });
+    agentSelector.addEventListener('change', handleAgentSelectorChange);
   }
 
   if (openSettingsBtn) {
@@ -254,7 +279,7 @@ function setupEventListeners() {
 
   if (aiChatInput) {
     aiChatInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.shiftKey) {
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
         e.preventDefault();
         handleAiChatSend();
       }
@@ -736,7 +761,7 @@ async function pasteToPage() {
       action: 'pasteToActiveTab',
       text: text,
       images: images
-    }, (response) => {
+    }, async (response) => {
       if (chrome.runtime.lastError) {
         console.error('[SidePanel] メッセージ送信エラー:', chrome.runtime.lastError);
         showNotification('貼り付けに失敗しました: ' + chrome.runtime.lastError.message);
@@ -748,7 +773,8 @@ async function pasteToPage() {
         }
       } else {
         console.log('[SidePanel] 貼り付け成功:', response);
-        showNotification('ページに貼り付けました');
+        await clearAll({ skipConfirm: true, skipNotification: true });
+        showNotification('ページに貼り付けました（テキストと画像をクリアしました）');
       }
     });
   } catch (error) {
@@ -767,13 +793,23 @@ async function clearText() {
 }
 
 // Allクリア（テキストと画像の両方をクリア）
-async function clearAll() {
-  if (confirm('テキストと画像をすべてクリアしますか？')) {
-    textEditor.value = '';
-    currentImages = [];
-    updateCharCount();
-    await saveData();
-    renderImages();
+async function clearAll(options = {}) {
+  const { skipConfirm = false, skipNotification = false } = options || {};
+
+  if (!skipConfirm) {
+    const confirmed = confirm('テキストと画像をすべてクリアしますか？');
+    if (!confirmed) {
+      return;
+    }
+  }
+
+  textEditor.value = '';
+  currentImages = [];
+  updateCharCount();
+  await saveData();
+  renderImages();
+
+  if (!skipNotification) {
     showNotification('すべてクリアしました');
   }
 }
@@ -812,38 +848,115 @@ window.deleteHashtag = deleteHashtag;
 
 // AIチャット送信（プレースホルダー）
 function handleAiChatSend() {
+  if (chatState.isSending) {
+    return;
+  }
+
   const message = aiChatInput?.value.trim();
   if (!message) {
     return;
   }
 
-  if (!agentSelector || !agentSelector.value) {
+  if (!agentSelector) {
+    showNotification('エージェント選択UIが初期化されていません');
+    return;
+  }
+
+  if (!agentSelector.value) {
     showNotification('先にエージェントを選択してください');
     return;
   }
 
-  if (aiChatMessages) {
-    const userMessage = document.createElement('div');
-    userMessage.classList.add('ai-message', 'ai-message-user');
-    userMessage.innerHTML = `<strong>あなた</strong><span>${formatMessageText(message)}</span>`;
-    aiChatMessages.appendChild(userMessage);
-    aiChatMessages.scrollTop = aiChatMessages.scrollHeight;
+  const selectedAgent = aiState.agents.find((agent) => agent.id === agentSelector.value);
+  if (!selectedAgent) {
+    showNotification('選択したエージェントが見つかりません');
+    return;
   }
+
+  if (!aiState.apiKey) {
+    showNotification('Claude APIキーを設定してください');
+    return;
+  }
+
+  ensureChatSession(selectedAgent);
+
+  const now = new Date().toISOString();
+  const userMessage = {
+    id: generateId('msg'),
+    role: 'user',
+    content: message,
+    createdAt: now,
+    status: 'delivered'
+  };
+
+  chatState.messages.push(userMessage);
+  chatState.updatedAt = now;
+  renderChatMessages();
 
   if (aiChatInput) {
     aiChatInput.value = '';
   }
 
-  if (aiChatMessages && agentSelector) {
-    const agentLabel = agentSelector.options[agentSelector.selectedIndex].text.trim();
-    const assistantMessage = document.createElement('div');
-    assistantMessage.classList.add('ai-message', 'ai-message-assistant');
-    assistantMessage.innerHTML = `<strong>${escapeHtml(agentLabel)}</strong><span>AIチャット機能は準備中です。まもなく応答が表示される予定です。</span>`;
-    aiChatMessages.appendChild(assistantMessage);
-    aiChatMessages.scrollTop = aiChatMessages.scrollHeight;
-  }
+  const assistantMessage = {
+    id: generateId('msg'),
+    role: 'assistant',
+    content: '',
+    createdAt: now,
+    status: 'pending'
+  };
 
-  showNotification('AIチャット機能は準備中です');
+  chatState.messages.push(assistantMessage);
+  renderChatMessages();
+
+  chatState.isSending = true;
+  setSendButtonState(true);
+
+  const payload = {
+    sessionId: chatState.sessionId,
+    agentId: selectedAgent.id,
+    agentName: selectedAgent.name || selectedAgent.label || '',
+    instructions: selectedAgent.instructions || '',
+    messages: buildConversationPayload()
+  };
+
+  chrome.runtime.sendMessage(
+    {
+      action: 'claudeChat',
+      payload
+    },
+    async (response) => {
+      chatState.isSending = false;
+      setSendButtonState(false);
+
+      if (chrome.runtime.lastError) {
+        console.error('[SidePanel] AIチャット送信エラー:', chrome.runtime.lastError);
+        assistantMessage.content = `エラー: ${chrome.runtime.lastError.message}`;
+        assistantMessage.status = 'failed';
+        chatState.updatedAt = new Date().toISOString();
+        renderChatMessages();
+        await persistChatSession();
+        showNotification('AIチャットの送信に失敗しました');
+        return;
+      }
+
+      if (!response || response.success === false) {
+        const errorMessage = response?.error || 'AI応答の取得に失敗しました';
+        assistantMessage.content = errorMessage;
+        assistantMessage.status = 'failed';
+        chatState.updatedAt = new Date().toISOString();
+        renderChatMessages();
+        await persistChatSession();
+        showNotification(errorMessage);
+        return;
+      }
+
+      assistantMessage.content = response.message || '';
+      assistantMessage.status = 'delivered';
+      chatState.updatedAt = new Date().toISOString();
+      renderChatMessages();
+      await persistChatSession();
+    }
+  );
 }
 
 // シンプルなHTMLエスケープ
@@ -860,6 +973,369 @@ function formatMessageText(text) {
   return escapeHtml(text).replace(/\n/g, '<br>');
 }
 
+function getDefaultAgents() {
+  if (window.AiAgentUtils) {
+    return window.AiAgentUtils.getDefaultAgents();
+  }
+  return [
+    {
+      id: 'buzz',
+      label: 'Buzz Booster',
+      name: 'バズ投稿エージェント',
+      description: 'SNSで話題を生むテンション高めの投稿を生成します。',
+      instructions:
+        '最新のトレンドやエモーショナルなフレーズを織り交ぜ、ユーザーの共感を誘う構成でテキストを組み立ててください。140文字以内を推奨。',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    },
+    {
+      id: 'reply',
+      label: 'Reply Concierge',
+      name: '返信サポートエージェント',
+      description: '丁寧かつ簡潔な返信メッセージを提案します。',
+      instructions:
+        '相手の意図を汲み取り、礼儀正しく、次のアクションが明確になる文章を提案してください。語尾は柔らかく。',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    },
+    {
+      id: 'editor',
+      label: 'Rewrite Master',
+      name: '文章リライトエージェント',
+      description: '既存の文章を読みやすくリライトします。',
+      instructions:
+        '元のニュアンスを保ちながら、構成・語彙を整え、プロフェッショナルで信頼できる印象の文章に書き換えてください。',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    }
+  ];
+}
+
+function normalizeAgents(agents, defaults) {
+  const defaultsMap = new Map(defaults.map((agent) => [agent.id, agent]));
+  const now = new Date().toISOString();
+  if (!Array.isArray(agents)) return defaults.map((agent) => ({ ...agent }));
+
+  return agents.map((agent, index) => {
+    const safeId = agent?.id || `agent-${index}`;
+    const fallback = defaultsMap.get(safeId) || {};
+    return {
+      id: safeId,
+      label: agent?.label || fallback.label || `Agent ${index + 1}`,
+      name: agent?.name || fallback.name || '',
+      description: agent?.description || fallback.description || '',
+      instructions: agent?.instructions || fallback.instructions || '',
+      createdAt: agent?.createdAt || fallback.createdAt || now,
+      updatedAt: agent?.updatedAt || fallback.updatedAt || now
+    };
+  });
+}
+
+function resolveSelectedAgentId(agents, storedId) {
+  if (!Array.isArray(agents) || agents.length === 0) {
+    return '';
+  }
+
+  if (storedId && agents.some((agent) => agent.id === storedId)) {
+    return storedId;
+  }
+
+  return agents[0].id;
+}
+
+function renderAgentSelector() {
+  if (!agentSelector) return;
+
+  const hasAgents = Array.isArray(aiState.agents) && aiState.agents.length > 0;
+  const placeholderOption = `<option value="" ${hasAgents ? '' : 'selected'}>${hasAgents ? 'エージェントを選択...' : 'エージェントがありません'}</option>`;
+
+  const optionsHtml = hasAgents
+    ? aiState.agents
+        .map((agent) => {
+          const selected = agent.id === aiState.selectedAgentId ? 'selected' : '';
+          return `<option value="${agent.id}" ${selected}>${escapeHtml(agent.name || agent.label)}</option>`;
+        })
+        .join('')
+    : '';
+
+  isAgentSelectionUpdateSilent = true;
+  agentSelector.innerHTML = placeholderOption + optionsHtml;
+  agentSelector.disabled = !hasAgents;
+  agentSelector.value = hasAgents ? aiState.selectedAgentId || '' : '';
+  isAgentSelectionUpdateSilent = false;
+}
+
+function setupStorageObservers() {
+  if (!chrome?.storage?.onChanged) return;
+
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local') return;
+
+    if (changes[StorageManager.STORAGE_KEYS.AI_AGENTS]) {
+      const defaults = getDefaultAgents();
+      aiState.agents = normalizeAgents(changes[StorageManager.STORAGE_KEYS.AI_AGENTS].newValue, defaults);
+      aiState.selectedAgentId = resolveSelectedAgentId(aiState.agents, aiState.selectedAgentId);
+      renderAgentSelector();
+      showNotification('エージェント設定を更新しました');
+    }
+
+    if (changes[StorageManager.STORAGE_KEYS.AI_SELECTED_AGENT_ID]) {
+      aiState.selectedAgentId = changes[StorageManager.STORAGE_KEYS.AI_SELECTED_AGENT_ID].newValue || '';
+      renderAgentSelector();
+      loadChatHistory();
+    }
+
+    if (changes[StorageManager.STORAGE_KEYS.CLAUDE_API_KEY]) {
+      aiState.apiKey = changes[StorageManager.STORAGE_KEYS.CLAUDE_API_KEY].newValue || '';
+    }
+
+    if (changes[StorageManager.STORAGE_KEYS.AI_CHAT_SESSIONS]) {
+      loadChatHistory();
+    }
+  });
+}
+
+async function handleAgentSelectorChange(event) {
+  const selectedValue = event.target.value;
+
+  if (isAgentSelectionUpdateSilent) {
+    return;
+  }
+
+  aiState.selectedAgentId = selectedValue;
+  await StorageManager.saveSelectedAgentId(selectedValue);
+  await loadChatHistory();
+
+  if (!selectedValue) {
+    showNotification('エージェントを選択してください');
+    return;
+  }
+
+  const selectedAgent = aiState.agents.find((agent) => agent.id === selectedValue);
+  if (selectedAgent) {
+    showNotification(`「${escapeHtml(selectedAgent.name || selectedAgent.label)}」と会話を開始します`);
+  }
+}
+
+const chatState = {
+  sessionId: '',
+  agentId: '',
+  agentName: '',
+  messages: [],
+  createdAt: '',
+  updatedAt: '',
+  isSending: false
+};
+
+let chatSessionsCache = [];
+
+async function loadChatHistory() {
+  try {
+    chatSessionsCache = await StorageManager.getChatSessions();
+    const activeSession = selectSessionForAgent(chatSessionsCache, aiState.selectedAgentId);
+    if (activeSession) {
+      applySessionToState(activeSession);
+    } else {
+      resetChatState();
+    }
+    renderChatMessages();
+  } catch (error) {
+    console.error('[SidePanel] チャット履歴の読み込みに失敗しました', error);
+    showNotification('チャット履歴の読み込みに失敗しました');
+  }
+}
+
+function selectSessionForAgent(sessions, agentId) {
+  if (!Array.isArray(sessions) || sessions.length === 0) {
+    return null;
+  }
+
+  const targetSessions = agentId ? sessions.filter((session) => session.agentId === agentId) : sessions;
+  if (targetSessions.length === 0) {
+    return null;
+  }
+
+  return [...targetSessions].sort((a, b) => {
+    const dateA = new Date(a.updatedAt || a.createdAt || 0).getTime();
+    const dateB = new Date(b.updatedAt || b.createdAt || 0).getTime();
+    return dateB - dateA;
+  })[0];
+}
+
+function applySessionToState(session) {
+  chatState.sessionId = session.id;
+  chatState.agentId = session.agentId;
+  chatState.agentName = session.agentName || '';
+  chatState.createdAt = session.createdAt || '';
+  chatState.updatedAt = session.updatedAt || session.createdAt || '';
+  chatState.messages = Array.isArray(session.messages)
+    ? session.messages.map((message) => ({
+        id: message.id || generateId('msg'),
+        role: message.role,
+        content: message.content,
+        createdAt: message.createdAt || session.createdAt || '',
+        status: 'delivered'
+      }))
+    : [];
+}
+
+function resetChatState() {
+  chatState.sessionId = '';
+  chatState.agentId = aiState.selectedAgentId || '';
+  const agent = aiState.agents.find((item) => item.id === chatState.agentId);
+  chatState.agentName = agent ? agent.name || agent.label || '' : '';
+  chatState.messages = [];
+  chatState.createdAt = '';
+  chatState.updatedAt = '';
+  chatState.isSending = false;
+}
+
+function ensureChatSession(agent) {
+  if (chatState.sessionId && chatState.agentId === agent.id) {
+    return;
+  }
+
+  chatState.sessionId = generateId('session');
+  chatState.agentId = agent.id;
+  chatState.agentName = agent.name || agent.label || '';
+  const now = new Date().toISOString();
+  chatState.createdAt = now;
+  chatState.updatedAt = now;
+  chatState.messages = [];
+}
+
+function renderChatMessages() {
+  if (!aiChatMessages) return;
+
+  if (!chatState.messages.length) {
+    aiChatMessages.innerHTML =
+      '<div class="ai-chat-empty">エージェントを選択してメッセージを送信すると会話が表示されます。</div>';
+    return;
+  }
+
+  aiChatMessages.innerHTML = chatState.messages
+    .map((message) => {
+      const roleClass = message.role === 'user' ? 'ai-message-user' : 'ai-message-assistant';
+      const pendingClass = message.status === 'pending' ? ' ai-message-pending' : '';
+      const failedClass = message.status === 'failed' ? ' ai-message-error' : '';
+      const nameLabel =
+        message.role === 'user' ? 'あなた' : escapeHtml(chatState.agentName || 'アシスタント');
+      const body =
+        message.status === 'pending'
+          ? '<span class="ai-message-loading">思考中…</span>'
+          : `<span>${formatMessageText(message.content || '')}</span>`;
+
+      return `
+        <div class="ai-message ${roleClass}${pendingClass}${failedClass}">
+          <strong>${nameLabel}</strong>
+          ${body}
+        </div>
+      `;
+    })
+    .join('');
+
+  aiChatMessages.scrollTop = aiChatMessages.scrollHeight;
+}
+
+function generateId(prefix) {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function setSendButtonState(isDisabled) {
+  if (aiChatSendBtn) {
+    aiChatSendBtn.disabled = isDisabled;
+    aiChatSendBtn.textContent = isDisabled ? '送信中…' : '送信';
+  }
+}
+
+async function persistChatSession() {
+  if (!chatState.sessionId || !chatState.agentId) {
+    return;
+  }
+
+  const persistedMessages = chatState.messages
+    .filter((message) => message.status !== 'pending')
+    .map((message) => ({
+      id: message.id,
+      role: message.role,
+      content: message.content,
+      createdAt: message.createdAt
+    }));
+
+  const sessionPayload = {
+    id: chatState.sessionId,
+    agentId: chatState.agentId,
+    agentName: chatState.agentName,
+    createdAt: chatState.createdAt || new Date().toISOString(),
+    updatedAt: chatState.updatedAt || new Date().toISOString(),
+    messages: persistedMessages
+  };
+
+  const nextSessions = Array.isArray(chatSessionsCache) ? [...chatSessionsCache] : [];
+  const sessionIndex = nextSessions.findIndex((session) => session.id === sessionPayload.id);
+  if (sessionIndex >= 0) {
+    nextSessions[sessionIndex] = sessionPayload;
+  } else {
+    nextSessions.push(sessionPayload);
+  }
+
+  await StorageManager.saveChatSessions(nextSessions);
+  chatSessionsCache = await StorageManager.getChatSessions();
+}
+
+function buildConversationPayload() {
+  return chatState.messages
+    .filter((message) => message.role === 'user' || (message.role === 'assistant' && message.status !== 'pending'))
+    .map((message) => ({
+      role: message.role,
+      content: message.content
+    }));
+}
+
+async function sendLatestAssistantMessageToEditor() {
+  const latestAssistant = [...chatState.messages]
+    .reverse()
+    .find((message) => message.role === 'assistant' && message.status === 'delivered' && message.content);
+
+  if (!latestAssistant) {
+    showNotification('反映できるAI応答がありません');
+    return;
+  }
+
+  const currentValue = textEditor.value || '';
+  let nextValue;
+
+  if (!currentValue.trim()) {
+    nextValue = latestAssistant.content;
+  } else {
+    const trimmed = currentValue.replace(/\s*$/, '');
+    nextValue = `${trimmed}\n\n${latestAssistant.content}`;
+  }
+
+  textEditor.value = nextValue;
+  updateCharCount();
+  await saveData();
+  textEditor.focus();
+  showNotification('最新のAI応答をテキストに反映しました');
+
+  await clearCurrentChatSession();
+}
+
+async function clearCurrentChatSession() {
+  if (!chatState.sessionId) {
+    resetChatState();
+    renderChatMessages();
+    return;
+  }
+
+  chatSessionsCache = Array.isArray(chatSessionsCache)
+    ? chatSessionsCache.filter((session) => session.id !== chatState.sessionId)
+    : [];
+
+  await StorageManager.saveChatSessions(chatSessionsCache);
+  resetChatState();
+  renderChatMessages();
+}
 // 初期化実行
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', init);
