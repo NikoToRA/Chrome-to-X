@@ -575,6 +575,9 @@ async function pasteContent(text, images) {
       } else if (platform === 'gmail') {
         // Gmailの画像アップロード機能を使用
         uploadSuccess = await uploadImagesToGmail(images);
+      } else if (platform === 'facebook') {
+        // Facebookの画像アップロード機能を使用
+        uploadSuccess = await uploadImagesToFacebook(images, element);
       } else {
         // その他のプラットフォーム: クリップボード経由で貼り付けを試行
         console.log('[Chrome to X] プラットフォーム:', platform, 'クリップボード経由で試行');
@@ -921,6 +924,99 @@ async function uploadImagesToGmail(images) {
     return true;
   } catch (error) {
     console.error('[Chrome to X] Gmailの画像アップロードに失敗:', error);
+    return false;
+  }
+}
+
+/**
+ * Facebookの画像アップロード機能を使用して画像をアップロード
+ */
+async function uploadImagesToFacebook(images, element) {
+  try {
+    console.log('[Chrome to X] Facebookの画像アップロード開始');
+
+    const scopeRoot = element?.closest('[role="dialog"]') ||
+                      element?.closest('[aria-label][role="group"]') ||
+                      document;
+
+    const findFileInput = () => {
+      const selectors = [
+        'input[type="file"][accept*="image"]',
+        'input[type="file"][accept*="photo"]',
+        'input[type="file"][data-testid="add-photo-input"]',
+        'input[type="file"][data-testid="media-attachment-input"]'
+      ];
+
+      for (const selector of selectors) {
+        const input = scopeRoot.querySelector(selector);
+        if (input) {
+          return input;
+        }
+      }
+      return null;
+    };
+
+    let fileInput = findFileInput();
+
+    if (!fileInput) {
+      const buttonSelectors = [
+        '[aria-label*="写真"]',
+        '[aria-label*="画像"]',
+        '[aria-label*="メディア"]',
+        '[aria-label*="Photo"]',
+        '[aria-label*="Image"]',
+        '[aria-label*="Media"]',
+        '[data-testid="media-attachment-add-photo-button"]',
+        '[data-testid="photo-video-button"]'
+      ];
+
+      for (const selector of buttonSelectors) {
+        const button = scopeRoot.querySelector(selector);
+        if (button) {
+          console.log('[Chrome to X] Facebookの画像ボタンをクリック:', selector, button);
+          button.click();
+          await new Promise(resolve => setTimeout(resolve, 500));
+          fileInput = findFileInput();
+          if (fileInput) {
+            break;
+          }
+        }
+      }
+    }
+
+    if (!fileInput) {
+      console.warn('[Chrome to X] Facebookのファイル入力要素が見つかりません');
+      return false;
+    }
+
+    console.log('[Chrome to X] Facebookのファイル入力要素を発見:', fileInput);
+
+    const files = [];
+    for (const image of images) {
+      const response = await fetch(image.base64);
+      const blob = await response.blob();
+      const fileName = image.name || `image_${Date.now()}.png`;
+      const file = new File([blob], fileName, { type: blob.type });
+      files.push(file);
+    }
+
+    const dataTransfer = new DataTransfer();
+    files.forEach(file => dataTransfer.items.add(file));
+    fileInput.files = dataTransfer.files;
+
+    const changeEvent = new Event('change', { bubbles: true, cancelable: true });
+    fileInput.dispatchEvent(changeEvent);
+
+    const inputEvent = new Event('input', { bubbles: true, cancelable: true });
+    fileInput.dispatchEvent(inputEvent);
+
+    console.log('[Chrome to X] Facebookの画像アップロード成功:', files.length, '枚');
+
+    await new Promise(resolve => setTimeout(resolve, 800));
+
+    return true;
+  } catch (error) {
+    console.error('[Chrome to X] Facebookの画像アップロードに失敗:', error);
     return false;
   }
 }

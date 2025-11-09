@@ -76,6 +76,41 @@
       
       // 少し待ってから処理（フォーカスが安定するのを待機）
       await new Promise(resolve => setTimeout(resolve, 50));
+
+      // まずは擬似的なPasteイベントを試す（FacebookのReactが内部状態を更新するようにする）
+      const canUseSyntheticPaste = typeof ClipboardEvent === 'function' && typeof DataTransfer === 'function';
+      if (canUseSyntheticPaste) {
+        try {
+          const pasteEvent = new ClipboardEvent('paste', {
+            bubbles: true,
+            cancelable: true,
+            clipboardData: new DataTransfer()
+          });
+
+          // clipboardDataにテキストを設定
+          pasteEvent.clipboardData.setData('text/plain', text);
+          pasteEvent.clipboardData.setData('text', text);
+
+          // Pasteイベントを発火
+          element.dispatchEvent(pasteEvent);
+
+          // Facebook/Reactが状態を更新するのを少し待つ
+          await new Promise(resolve => setTimeout(resolve, 150));
+
+          const afterText = normalizeContentText(element);
+          const wasInserted = afterText.length > beforeText.length || afterText.includes(text.trim());
+
+          if (wasInserted) {
+            console.log('[Chrome to X] Facebook: 擬似Pasteイベントで挿入成功');
+            if (dispatchChange) {
+              element.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            return Promise.resolve(true);
+          }
+        } catch (error) {
+          console.warn('[Chrome to X] Facebook: 擬似Pasteイベントに失敗, フォールバックを使用:', error);
+        }
+      }
       
       // 改行文字を<div>要素に変換（HTMLエスケープも含む）
       const htmlText = convertTextToHtml(text);

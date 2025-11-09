@@ -339,7 +339,7 @@
                 range = document.createRange();
                 range.selectNodeContents(element);
                 range.collapse(false);
-              }
+        }
             }
             
             // 既存の内容を削除（選択範囲がある場合）
@@ -388,7 +388,7 @@
               data: text
             }));
             element.dispatchEvent(new Event('change', { bubbles: true }));
-          }
+        }
         }
 
         // 結果を確認（Draft.jsが非同期で処理する可能性を考慮）
