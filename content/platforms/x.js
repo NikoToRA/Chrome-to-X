@@ -17,13 +17,16 @@
                          element.closest('[data-testid="tweetTextarea_0"]');
     
     if (isDraftEditor) {
-      // Draft.jsエディタでは、<div>要素が改行を表す
-      // 直接の子要素の<div>を取得し、それぞれのテキストを改行で結合する
-      const childDivs = Array.from(element.children).filter(child => child.tagName === 'DIV');
-      if (childDivs.length > 0) {
+      // Draft.jsエディタでは、data-block="true"を持つ<div>要素が改行を表す
+      let lineDivs = Array.from(element.querySelectorAll('div[data-block="true"]'));
+      if (lineDivs.length === 0) {
+        // フォールバック: 直接の子要素の<div>を使用
+        lineDivs = Array.from(element.children).filter(child => child.tagName === 'DIV');
+      }
+      if (lineDivs.length > 0) {
         // Draft.jsのブロック構造を使用
         let text = '';
-        childDivs.forEach((div, index) => {
+        lineDivs.forEach((div, index) => {
           if (index > 0) {
             text += '\n';
           }
@@ -230,18 +233,59 @@
           pasteSuccess = dispatchSyntheticPaste(element, text);
           
           // Pasteイベントが発火された後、Draft.jsが処理するのを待つ
-          await new Promise(resolve => setTimeout(resolve, 300));
+          // 複数回チェックして、テキストが挿入されるまで待つ
+          let pasteHandledCheck = false;
+          for (let i = 0; i < 10; i++) {
+            await new Promise(resolve => setTimeout(resolve, 100));
+            
+            // DOM構造を直接確認（Draft.jsが<div data-block="true">要素を追加しているか）
+            let lineDivs = Array.from(element.querySelectorAll('div[data-block="true"]'));
+            if (lineDivs.length === 0) {
+              lineDivs = Array.from(element.children).filter(child => child.tagName === 'DIV');
+            }
+            const afterPasteText = normalizeContentText(element);
+            
+            // 改行を保持したまま比較するための関数
+            const normalizeForComparison = (str) => {
+              return str.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
+            };
+            
+            const normalizedOriginal = normalizeForComparison(text);
+            const normalizedAfter = normalizeForComparison(afterPasteText);
+            
+            // テキストが挿入されたか確認
+            const originalLines = normalizedOriginal.split('\n');
+            const afterLines = normalizedAfter.split('\n');
+            
+            // 改行を含むテキストが正しく挿入されたか確認
+            const hasCorrectNewlines = afterLines.length >= originalLines.length;
+            const hasAllLines = originalLines.every((line, idx) => {
+              if (line.trim() === '') return true; // 空行はスキップ
+              return afterLines.some(afterLine => afterLine.includes(line.trim()));
+            });
+            
+            const textInserted = afterPasteText.length > beforeText.length && 
+                                (normalizedAfter.includes(normalizedOriginal) || 
+                                 (hasCorrectNewlines && hasAllLines));
+            
+            // <div>要素が追加されているかも確認
+            const hasDivStructure = lineDivs.length >= originalLines.length;
+            
+            if (textInserted || hasDivStructure) {
+              pasteHandledCheck = true;
+              console.log('[Chrome to X] Pasteイベントでテキストが挿入されました（改行保持）', {
+                attempt: i + 1,
+                afterPasteText: afterPasteText.substring(0, 100),
+                lineDivsCount: lineDivs.length,
+                originalLines: originalLines.length,
+                afterLines: afterLines.length
+              });
+              break;
+            }
+          }
           
-          // テキストが挿入されたか確認
-          const afterPasteText = normalizeContentText(element);
-          // テキストが挿入され、かつ期待されるテキストが含まれているか確認
-          const textInserted = afterPasteText.length > beforeText.length && 
-                              (afterPasteText.includes(text.trim()) || 
-                               afterPasteText.replace(/\s+/g, ' ').includes(text.trim().replace(/\s+/g, ' ')));
-          
-          if (textInserted) {
+          if (pasteHandledCheck) {
             pasteHandled = true;
-            console.log('[Chrome to X] Pasteイベントでテキストが挿入されました');
           } else {
             console.log('[Chrome to X] Pasteイベントではテキストが挿入されませんでした');
           }
@@ -249,83 +293,102 @@
         
         // Pasteイベントで処理されなかった場合のみ、直接DOM操作を試す
         if (!pasteHandled) {
-          const selection = window.getSelection();
-          let range;
+          // 再度テキストを確認（Pasteイベントが非同期で処理された可能性がある）
+          const currentText = normalizeContentText(element);
+          const normalizedCurrent = currentText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
+          const normalizedOriginal = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
           
-          if (selection.rangeCount > 0) {
-            range = selection.getRangeAt(0);
+          // 既に改行を含むテキストが挿入されている場合は、DOM操作をスキップ
+          const currentLines = normalizedCurrent.split('\n');
+          const originalLines = normalizedOriginal.split('\n');
+          
+          const alreadyHasCorrectText = currentLines.length >= originalLines.length &&
+                                       normalizedCurrent.includes(normalizedOriginal);
+          
+          if (alreadyHasCorrectText) {
+            console.log('[Chrome to X] 既に正しいテキストが挿入されているため、DOM操作をスキップします');
+            pasteHandled = true;
           } else {
-            // 要素内の最後のテキストノードを探す
-            const walker = document.createTreeWalker(
-              element,
-              NodeFilter.SHOW_TEXT,
-              null,
-              false
-            );
+            console.log('[Chrome to X] DOM操作でテキストを挿入します');
             
-            let lastTextNode = null;
-            let node;
-            while (node = walker.nextNode()) {
-              lastTextNode = node;
-            }
+            const selection = window.getSelection();
+            let range;
             
-            if (lastTextNode) {
-              range = document.createRange();
-              range.setStartAfter(lastTextNode);
-              range.collapse(true);
+            if (selection.rangeCount > 0) {
+              range = selection.getRangeAt(0);
             } else {
-              range = document.createRange();
-              range.selectNodeContents(element);
-              range.collapse(false);
-            }
-          }
-          
-          // 既存の内容を削除（選択範囲がある場合）
-          if (selection.rangeCount > 0 && !selection.isCollapsed) {
-            range.deleteContents();
-          }
-          
-          // 改行がある場合は、各行を<div>要素として挿入
-          if (lines.length > 1) {
-            const fragment = document.createDocumentFragment();
-            lines.forEach((line, index) => {
-              const div = document.createElement('div');
-              if (line === '') {
-                // 空行の場合は<br>タグを追加
-                div.appendChild(document.createElement('br'));
-              } else {
-                div.textContent = line;
+              // 要素内の最後のテキストノードを探す
+              const walker = document.createTreeWalker(
+                element,
+                NodeFilter.SHOW_TEXT,
+                null,
+                false
+              );
+              
+              let lastTextNode = null;
+              let node;
+              while (node = walker.nextNode()) {
+                lastTextNode = node;
               }
-              fragment.appendChild(div);
-            });
+              
+              if (lastTextNode) {
+                range = document.createRange();
+                range.setStartAfter(lastTextNode);
+                range.collapse(true);
+              } else {
+                range = document.createRange();
+                range.selectNodeContents(element);
+                range.collapse(false);
+              }
+            }
             
-            range.insertNode(fragment);
+            // 既存の内容を削除（選択範囲がある場合）
+            if (selection.rangeCount > 0 && !selection.isCollapsed) {
+              range.deleteContents();
+            }
             
-            // カーソル位置を最後に設定
-            const lastDiv = fragment.lastChild;
-            if (lastDiv) {
-              range.setStartAfter(lastDiv);
+            // 改行がある場合は、各行を<div>要素として挿入
+            if (lines.length > 1) {
+              const fragment = document.createDocumentFragment();
+              lines.forEach((line, index) => {
+                const div = document.createElement('div');
+                if (line === '') {
+                  // 空行の場合は<br>タグを追加
+                  div.appendChild(document.createElement('br'));
+                } else {
+                  div.textContent = line;
+                }
+                fragment.appendChild(div);
+              });
+              
+              range.insertNode(fragment);
+              
+              // カーソル位置を最後に設定
+              const lastDiv = fragment.lastChild;
+              if (lastDiv) {
+                range.setStartAfter(lastDiv);
+                range.collapse(true);
+              }
+            } else {
+              // 改行がない場合は通常のテキストノードを挿入
+              const textNode = document.createTextNode(text);
+              range.insertNode(textNode);
+              range.setStartAfter(textNode);
               range.collapse(true);
             }
-          } else {
-            // 改行がない場合は通常のテキストノードを挿入
-            const textNode = document.createTextNode(text);
-            range.insertNode(textNode);
-            range.setStartAfter(textNode);
-            range.collapse(true);
+            
+            selection.removeAllRanges();
+            selection.addRange(range);
+            
+            // input/change イベントを発火
+            element.dispatchEvent(new InputEvent('input', { 
+              bubbles: true, 
+              cancelable: true,
+              inputType: 'insertFromPaste',
+              data: text
+            }));
+            element.dispatchEvent(new Event('change', { bubbles: true }));
           }
-          
-          selection.removeAllRanges();
-          selection.addRange(range);
-          
-          // input/change イベントを発火
-          element.dispatchEvent(new InputEvent('input', { 
-            bubbles: true, 
-            cancelable: true,
-            inputType: 'insertFromPaste',
-            data: text
-          }));
-          element.dispatchEvent(new Event('change', { bubbles: true }));
         }
 
         // 結果を確認（Draft.jsが非同期で処理する可能性を考慮）

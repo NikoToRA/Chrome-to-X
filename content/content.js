@@ -474,31 +474,31 @@ async function pasteContent(text, images) {
       const maxRetries = 5;
       
       while (!handler && retryCount < maxRetries) {
-        if (window.PlatformHandlers) {
-          // Xの場合
-          if (platform === 'x' && window.PlatformHandlers.x) {
-            handler = window.PlatformHandlers.x;
-            console.log('[Chrome to X] Xハンドラーを選択');
+      if (window.PlatformHandlers) {
+        // Xの場合
+        if (platform === 'x' && window.PlatformHandlers.x) {
+          handler = window.PlatformHandlers.x;
+          console.log('[Chrome to X] Xハンドラーを選択');
             break;
-          }
-          // Facebookの場合
-          else if (platform === 'facebook' && window.PlatformHandlers.facebook) {
-            handler = window.PlatformHandlers.facebook;
-            console.log('[Chrome to X] Facebookハンドラーを選択');
+        }
+        // Facebookの場合
+        else if (platform === 'facebook' && window.PlatformHandlers.facebook) {
+          handler = window.PlatformHandlers.facebook;
+          console.log('[Chrome to X] Facebookハンドラーを選択');
             break;
-          }
-          // デフォルトハンドラー
-          else if (window.PlatformHandlers.default) {
-            handler = window.PlatformHandlers.default;
-            console.log('[Chrome to X] デフォルトハンドラーを選択');
+        }
+        // デフォルトハンドラー
+        else if (window.PlatformHandlers.default) {
+          handler = window.PlatformHandlers.default;
+          console.log('[Chrome to X] デフォルトハンドラーを選択');
             break;
-          }
+        }
         }
         
         if (!handler && retryCount < maxRetries - 1) {
           await new Promise(resolve => setTimeout(resolve, 50));
           retryCount++;
-        } else {
+      } else {
           break;
         }
       }
