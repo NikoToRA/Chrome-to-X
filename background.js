@@ -53,6 +53,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
               'content/platforms/default.js',
               'content/platforms/x.js',
               'content/platforms/facebook.js',
+              'content/platforms/google-docs.js',
               'content/content.js'
             ]
           });
@@ -146,6 +147,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
               'content/platforms/default.js',
               'content/platforms/x.js',
               'content/platforms/facebook.js',
+              'content/platforms/google-docs.js',
               'content/content.js'
             ]
           });
@@ -276,7 +278,64 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       });
     return true; // 非同期レスポンス用
   }
+
+  // Google Docs用: Offscreen document経由でクリップボードに書き込む
+  if (request.action === 'writeToClipboard') {
+    (async () => {
+      try {
+        console.log('[Background] クリップボードに書き込み:', request.text ? 'テキスト' : '画像');
+
+        // Offscreen documentを作成（まだ存在しない場合）
+        await setupOffscreenDocument();
+
+        // Offscreen documentにメッセージを送信
+        const response = await chrome.runtime.sendMessage({
+          action: 'writeToClipboard',
+          text: request.text,
+          imageData: request.imageData
+        });
+
+        if (response && response.success) {
+          console.log('[Background] Offscreen経由でクリップボード書き込み成功');
+          sendResponse({ success: true });
+        } else {
+          console.error('[Background] Offscreen経由でクリップボード書き込み失敗:', response?.error);
+          sendResponse({ success: false, error: response?.error || 'クリップボード書き込み失敗' });
+        }
+      } catch (error) {
+        console.error('[Background] クリップボード書き込みエラー:', error);
+        sendResponse({ success: false, error: error.message });
+      }
+    })();
+    return true; // 非同期レスポンス用
+  }
 });
+
+/**
+ * Offscreen documentをセットアップ
+ */
+async function setupOffscreenDocument() {
+  // 既にOffscreen documentが存在するか確認
+  const existingContexts = await chrome.runtime.getContexts({
+    contextTypes: ['OFFSCREEN_DOCUMENT'],
+    documentUrls: [chrome.runtime.getURL('offscreen/offscreen.html')]
+  });
+
+  if (existingContexts.length > 0) {
+    console.log('[Background] Offscreen document は既に存在します');
+    return;
+  }
+
+  // Offscreen documentを作成
+  console.log('[Background] Offscreen document を作成します');
+  await chrome.offscreen.createDocument({
+    url: 'offscreen/offscreen.html',
+    reasons: [chrome.offscreen.Reason.CLIPBOARD],
+    justification: 'Google Docs等へのテキスト・画像貼り付けのため、クリップボードAPIにアクセスする必要があります'
+  });
+
+  console.log('[Background] Offscreen document を作成しました');
+}
 
 // ArrayBufferをBase64に変換
 function arrayBufferToBase64(buffer) {

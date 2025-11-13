@@ -53,6 +53,16 @@ class PlatformDetector {
       return 'hatena';
     }
 
+    // Notion
+    if (hostname.includes('notion.so') || hostname.includes('notion.site')) {
+      return 'notion';
+    }
+
+    // Google Docs
+    if (hostname.includes('docs.google.com')) {
+      return 'google-docs';
+    }
+
     return null;
   }
 
@@ -63,7 +73,7 @@ class PlatformDetector {
    */
   static detectFromDOM(document) {
     // X (旧Twitter)
-    if (document.querySelector('[data-testid="tweetTextarea_0"]') || 
+    if (document.querySelector('[data-testid="tweetTextarea_0"]') ||
         document.querySelector('[data-testid="tweet"]')) {
       return 'x';
     }
@@ -72,6 +82,20 @@ class PlatformDetector {
     if (document.querySelector('[data-pagelet="Composer"]') ||
         document.querySelector('[role="textbox"][aria-label*="何を考えていますか"]')) {
       return 'facebook';
+    }
+
+    // Notion
+    if (document.querySelector('[data-content-editable-root="true"]') ||
+        document.querySelector('.notion-page-content') ||
+        document.querySelector('[placeholder*="何か入力"]')) {
+      return 'notion';
+    }
+
+    // Google Docs
+    if (document.querySelector('.kix-appview-editor') ||
+        document.querySelector('.docs-editor') ||
+        document.querySelector('.kix-page')) {
+      return 'google-docs';
     }
 
     return null;
@@ -110,7 +134,9 @@ class PlatformDetector {
       'instagram': 'Instagram',
       'linkedin': 'LinkedIn',
       'note': 'Note',
-      'hatena': 'はてなブログ'
+      'hatena': 'はてなブログ',
+      'notion': 'Notion',
+      'google-docs': 'Google Docs'
     };
     return names[platform] || platform || '不明';
   }

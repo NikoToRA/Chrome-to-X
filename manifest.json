@@ -8,7 +8,8 @@
     "storage",
     "tabs",
     "clipboardWrite",
-    "scripting"
+    "scripting",
+    "offscreen"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -26,12 +27,15 @@
     {
       "matches": ["<all_urls>"],
       "js": [
+        "content/platforms/generic.js",
         "content/platforms/default.js",
         "content/platforms/x.js",
         "content/platforms/facebook.js",
+        "content/platforms/google-docs.js",
         "content/content.js"
       ],
-      "run_at": "document_idle"
+      "run_at": "document_idle",
+      "all_frames": true
     }
   ],
   "options_page": "options/options.html"

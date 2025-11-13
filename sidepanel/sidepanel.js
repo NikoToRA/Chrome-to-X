@@ -33,6 +33,7 @@ const aiChatForm = document.getElementById('aiChatForm');
 const openSettingsBtn = document.getElementById('openSettingsBtn');
 const retainTextToggle = document.getElementById('retainTextToggle');
 const clearChatBtn = document.getElementById('clearChatBtn');
+const executePasteBtn = document.getElementById('executePasteBtn');
 // 状態管理
 let currentImages = [];
 let hashtags = [];
@@ -290,7 +291,40 @@ function setupEventListeners() {
   // ページに貼り付ける機能
   pasteToPageBtn.addEventListener('click', async () => {
     await pasteToPage();
+    // ペーストボタンを表示
+    if (executePasteBtn) {
+      executePasteBtn.style.display = 'block';
+    }
   });
+  
+  // ペーストボタンのイベントリスナー
+  if (executePasteBtn) {
+    executePasteBtn.addEventListener('click', async () => {
+      try {
+        // アクティブタブを取得
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab) {
+          showNotification('アクティブなタブが見つかりません');
+          return;
+        }
+        
+        // タブにメッセージを送信してペーストを実行
+        chrome.tabs.sendMessage(tab.id, { 
+          action: 'simulatePaste' 
+        }, (response) => {
+          if (chrome.runtime.lastError) {
+            console.error('ペーストエラー:', chrome.runtime.lastError);
+            showNotification('ペーストに失敗しました');
+          } else {
+            showNotification('ペーストを実行しました');
+          }
+        });
+      } catch (error) {
+        console.error('ペーストエラー:', error);
+        showNotification('ペーストに失敗しました');
+      }
+    });
+  }
 
   if (sendAiToTextBtn) {
     sendAiToTextBtn.addEventListener('click', async () => {

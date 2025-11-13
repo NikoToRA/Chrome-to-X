@@ -1,15 +1,15 @@
 /**
- * デフォルトハンドラー（Google Docs用）
+ * 汎用のテキスト貼り付けハンドラー
+ * 通常のtextarea、input、contenteditable要素に対応
  *
- * 注意: このファイルは元々汎用ハンドラーでしたが、Google Docsでの動作が確認されたため、
- * Google Docs専用として保持しています。
+ * このハンドラーは、特定のプラットフォームに特化していないあらゆるWebサイトで使用されます。
+ * Google Docsでの動作実績あり。
  *
- * 汎用ハンドラーは generic.js を参照してください。
- *
- * Google Docsでの動作実績:
- * - CANVAS要素への対応
- * - Background Script経由のクリップボード操作
- * - 3段階フォールバック（execCommand → ClipboardAPI → DOM操作）
+ * 特徴:
+ * - execCommand → ClipboardAPI → DOM操作の3段階フォールバック
+ * - Background Script経由のクリップボード操作（フォーカス不要）
+ * - 非標準要素（カスタム要素、Reactコンポーネント等）への対応
+ * - IFRAMEの検出と適切な処理
  */
 
 (function() {
@@ -630,11 +630,11 @@
     window.PlatformHandlers = {};
   }
 
-  window.PlatformHandlers.default = {
+  window.PlatformHandlers.generic = {
     insertText: insertText,
     insertImages: insertImages,
     supports: supports
   };
 
-  console.log('[Chrome to X] デフォルトハンドラー（Google Docs用として保持）を読み込みました');
+  console.log('[Chrome to X] 汎用ハンドラー（generic）を読み込みました');
 })();
